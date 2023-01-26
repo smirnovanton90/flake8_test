@@ -1,323 +1,419 @@
-import streamlit as st
-import requests
-import base64
-import io
-from PIL import Image, ImageDraw, ImageFont
-import glob
-import cv2 as cv2
-from base64 import decodebytes
-from io import BytesIO
+import logging
+import logging.handlers
+import queue
+import urllib.request
+from pathlib import Path
+from typing import Literal
+
+import av
+import cv2
 import numpy as np
-import pandas as pd
-import matplotlib.pyplot as plt
-from roboflow import Roboflow
+import PIL
+import streamlit as st
+from aiortc.contrib.media import MediaPlayer
 
-## store initial session state values
-workspace_id, model_id, version_number, private_api_key = ('', '', '', '')
-if 'confidence_threshold' not in st.session_state:
-    st.session_state['confidence_threshold'] = '40'
-if 'overlap_threshold' not in st.session_state:
-    st.session_state['overlap_threshold'] = '30'
-if 'workspace_id' not in st.session_state:
-    st.session_state['workspace_id'] = ''
-if 'model_id' not in st.session_state:
-    st.session_state['model_id'] = ''
-if 'version_number' not in st.session_state:
-    st.session_state['version_number'] = ''
-if 'private_api_key' not in st.session_state:
-    st.session_state['private_api_key'] = ''
-if 'include_bbox' not in st.session_state:
-    st.session_state['include_bbox'] = 'Yes'
-if 'include_class' not in st.session_state:
-    st.session_state['include_class'] = 'Show Labels'
-if 'box_type' not in st.session_state:
-    st.session_state['box_type'] = 'regular'
+from streamlit_webrtc import (
+    ClientSettings,
+    VideoTransformerBase,
+    WebRtcMode,
+    webrtc_streamer,
+)
 
-##########
-#### Set up main app logic
-##########
-def drawBoxes(model_object, img_object, uploaded_file, show_bbox, show_class_label,
-              show_box_type, font = cv2.FONT_HERSHEY_SIMPLEX):
-    
-    collected_predictions = pd.DataFrame(columns=['class', 'confidence', 'x0', 'x1', 'y0', 'y1', 'box area'])
-    
-    if isinstance(uploaded_file, str):
-        img = cv2.imread(uploaded_file)
-        # perform inference on the selected image
-        predictions = model_object.predict(uploaded_file, confidence=int(st.session_state['confidence_threshold']),
-                                           overlap=st.session_state['overlap_threshold'])
-    else:
-        predictions = model_object.predict(uploaded_file, confidence=int(st.session_state['confidence_threshold']),
-                                           overlap=st.session_state['overlap_threshold'])
-    
-    predictions_json = predictions.json()
-    # drawing bounding boxes with the Pillow library
-    # https://docs.roboflow.com/inference/hosted-api#response-object-format
-    for bounding_box in predictions:
-        x0 = bounding_box['x'] - bounding_box['width'] / 2
-        x1 = bounding_box['x'] + bounding_box['width'] / 2
-        y0 = bounding_box['y'] - bounding_box['height'] / 2
-        y1 = bounding_box['y'] + bounding_box['height'] / 2
-        class_name = bounding_box['class']
-        confidence_score = bounding_box['confidence']
-        box = (x0, x1, y0, y1)
-        collected_predictions = collected_predictions.append({'class':class_name, 'confidence':confidence_score,
-                                            'x0':int(x0), 'x1':int(x1), 'y0':int(y0), 'y1':int(y1), 'box area':box},
-                                            ignore_index=True)
-        # position coordinates: start = (x0, y0), end = (x1, y1)
-        # color = RGB-value for bounding box color, (0,0,0) is "black"
-        # thickness = stroke width/thickness of bounding box
-        start_point = (int(x0), int(y0))
-        end_point = (int(x1), int(y1))
-        if show_box_type == 'regular':
-            if show_bbox == 'Yes':
-                # draw/place bounding boxes on image
-                cv2.rectangle(img, start_point, end_point, color=(0,0,0), thickness=2)
+HERE = Path(__file__).parent
 
-            if show_class_label == 'Show Labels':
-                # add class name with filled background
-                cv2.rectangle(img, (int(x0), int(y0)), (int(x0) + 40, int(y0) - 20), color=(0,0,0),
-                        thickness=-1)
-                cv2.putText(img,
-                    class_name,#text to place on image
-                    (int(x0), int(y0) - 5),#location of text
-                    font,#font
-                    0.4,#font scale
-                    (255,255,255),#text color
-                    thickness=1#thickness/"weight" of text
+
+@st.cache
+def setup_logger():
+    logging.basicConfig(level=logging.DEBUG)
+
+    ch = logging.StreamHandler()
+    ch.setLevel(logging.DEBUG)
+    formatter = logging.Formatter(
+        "[%(asctime)s] %(levelname)7s in %(module)s (%(filename)s:%(lineno)d): "
+        "%(message)s"
+    )
+    ch.setFormatter(formatter)
+
+    st_webrtc_logger = logging.getLogger("streamlit_webrtc")
+
+    st_webrtc_logger.addHandler(ch)
+    st_webrtc_logger.setLevel(logging.DEBUG)
+
+    # `aiortc` does not have loggers with a common prefix
+    # and the loggers cannot be configured in this way.
+    # See https://github.com/aiortc/aiortc/issues/446
+    # aiortc_logger = logging.getLogger("aiortc")
+    # aiortc_logger.addHandler(ch)
+    # aiortc_logger.setLevel(logging.DEBUG)
+
+    logger = logging.getLogger(__name__)
+    logger.addHandler(ch)
+    logger.setLevel(logging.DEBUG)
+
+
+# This code is based on https://github.com/streamlit/demo-self-driving/blob/230245391f2dda0cb464008195a470751c01770b/streamlit_app.py#L48  # noqa: E501
+def download_file(url, download_to: Path, expected_size=None):
+    # Don't download the file twice.
+    # (If possible, verify the download using the file length.)
+    if download_to.exists():
+        if expected_size:
+            if download_to.stat().st_size == expected_size:
+                return
+        else:
+            st.info(f"{url} is already downloaded.")
+            if not st.button("Download again?"):
+                return
+
+    download_to.parent.mkdir(parents=True, exist_ok=True)
+
+    # These are handles to two visual elements to animate.
+    weights_warning, progress_bar = None, None
+    try:
+        weights_warning = st.warning("Downloading %s..." % url)
+        progress_bar = st.progress(0)
+        with open(download_to, "wb") as output_file:
+            with urllib.request.urlopen(url) as response:
+                length = int(response.info()["Content-Length"])
+                counter = 0.0
+                MEGABYTES = 2.0 ** 20.0
+                while True:
+                    data = response.read(8192)
+                    if not data:
+                        break
+                    counter += len(data)
+                    output_file.write(data)
+
+                    # We perform animation by overwriting the elements.
+                    weights_warning.warning(
+                        "Downloading %s... (%6.2f/%6.2f MB)"
+                        % (url, counter / MEGABYTES, length / MEGABYTES)
                     )
+                    progress_bar.progress(min(counter / length, 1.0))
+    # Finally, we remove these visual elements by calling .empty().
+    finally:
+        if weights_warning is not None:
+            weights_warning.empty()
+        if progress_bar is not None:
+            progress_bar.empty()
 
-        if show_box_type == 'fill':
-            if show_bbox == 'Yes':
-                # draw/place bounding boxes on image
-                cv2.rectangle(img, start_point, end_point, color=(0,0,0), thickness=-1)
 
-            if show_class_label == 'Show Labels':
-                # add class name with filled background
-                cv2.rectangle(img, (int(x0), int(y0)), (int(x0) + 40, int(y0) - 20), color=(0,0,0),
-                        thickness=-1)
-                cv2.putText(img,
-                    class_name,#text to place on image
-                    (int(x0), int(y0) - 5),#location of text
-                    font,#font
-                    0.4,#font scale
-                    (255,255,255),#text color
-                    thickness=1#thickness/"weight" of text
+def main():
+    st.header("WebRTC demo")
+
+    object_detection_page = "Real time object detection (sendrecv)"
+    video_filters_page = (
+        "Real time video transform with simple OpenCV filters (sendrecv)"
+    )
+    streaming_page = (
+        "Consuming media files on server-side and streaming it to browser (recvonly)"
+    )
+    sendonly_page = "WebRTC is sendonly and images are shown via st.image() (sendonly)"
+    loopback_page = "Simple video loopback (sendrecv)"
+    app_mode = st.sidebar.selectbox(
+        "Choose the app mode",
+        [
+            object_detection_page,
+            video_filters_page,
+            streaming_page,
+            sendonly_page,
+            loopback_page,
+        ],
+    )
+    st.subheader(app_mode)
+
+    if app_mode == video_filters_page:
+        app_video_filters()
+    elif app_mode == object_detection_page:
+        app_object_detection()
+    elif app_mode == streaming_page:
+        app_streaming()
+    elif app_mode == sendonly_page:
+        app_sendonly()
+    elif app_mode == loopback_page:
+        app_loopback()
+
+
+def app_loopback():
+    """ Simple video loopback """
+    webrtc_streamer(
+        key="loopback",
+        mode=WebRtcMode.SENDRECV,
+        client_settings=WEBRTC_CLIENT_SETTINGS,
+        video_transformer_class=None,  # NoOp
+    )
+
+
+def app_video_filters():
+    """ Video transforms with OpenCV """
+
+    class OpenCVVideoTransformer(VideoTransformerBase):
+        type: Literal["noop", "cartoon", "edges", "rotate"]
+
+        def __init__(self) -> None:
+            self.type = "noop"
+
+        def transform(self, frame: av.VideoFrame) -> av.VideoFrame:
+            img = frame.to_ndarray(format="bgr24")
+
+            if self.type == "noop":
+                pass
+            elif self.type == "cartoon":
+                # prepare color
+                img_color = cv2.pyrDown(cv2.pyrDown(img))
+                for _ in range(6):
+                    img_color = cv2.bilateralFilter(img_color, 9, 9, 7)
+                img_color = cv2.pyrUp(cv2.pyrUp(img_color))
+
+                # prepare edges
+                img_edges = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+                img_edges = cv2.adaptiveThreshold(
+                    cv2.medianBlur(img_edges, 7),
+                    255,
+                    cv2.ADAPTIVE_THRESH_MEAN_C,
+                    cv2.THRESH_BINARY,
+                    9,
+                    2,
+                )
+                img_edges = cv2.cvtColor(img_edges, cv2.COLOR_GRAY2RGB)
+
+                # combine color and edges
+                img = cv2.bitwise_and(img_color, img_edges)
+            elif self.type == "edges":
+                # perform edge detection
+                img = cv2.cvtColor(cv2.Canny(img, 100, 200), cv2.COLOR_GRAY2BGR)
+            elif self.type == "rotate":
+                # rotate image
+                rows, cols, _ = img.shape
+                M = cv2.getRotationMatrix2D((cols / 2, rows / 2), frame.time * 45, 1)
+                img = cv2.warpAffine(img, M, (cols, rows))
+
+            return img
+
+    webrtc_ctx = webrtc_streamer(
+        key="opencv-filter",
+        mode=WebRtcMode.SENDRECV,
+        client_settings=WEBRTC_CLIENT_SETTINGS,
+        video_transformer_class=OpenCVVideoTransformer,
+        async_transform=True,
+    )
+
+    transform_type = st.radio(
+        "Select transform type", ("noop", "cartoon", "edges", "rotate")
+    )
+    if webrtc_ctx.video_transformer:
+        webrtc_ctx.video_transformer.type = transform_type
+
+    st.markdown(
+        "This demo is based on "
+        "https://github.com/aiortc/aiortc/blob/2362e6d1f0c730a0f8c387bbea76546775ad2fe8/examples/server/server.py#L34. "
+        "Many thanks to the project."
+    )
+
+
+def app_object_detection():
+    """Object detection demo with MobileNet SSD.
+    This model and code are based on
+    https://github.com/robmarkcole/object-detection-app
+    """
+    MODEL_URL = "https://github.com/robmarkcole/object-detection-app/raw/master/model/MobileNetSSD_deploy.caffemodel"  # noqa: E501
+    MODEL_LOCAL_PATH = HERE / "./models/MobileNetSSD_deploy.caffemodel"
+    PROTOTXT_URL = "https://github.com/robmarkcole/object-detection-app/raw/master/model/MobileNetSSD_deploy.prototxt.txt"  # noqa: E501
+    PROTOTXT_LOCAL_PATH = HERE / "./models/MobileNetSSD_deploy.prototxt.txt"
+
+    CLASSES = [
+        "background",
+        "aeroplane",
+        "bicycle",
+        "bird",
+        "boat",
+        "bottle",
+        "bus",
+        "car",
+        "cat",
+        "chair",
+        "cow",
+        "diningtable",
+        "dog",
+        "horse",
+        "motorbike",
+        "person",
+        "pottedplant",
+        "sheep",
+        "sofa",
+        "train",
+        "tvmonitor",
+    ]
+    COLORS = np.random.uniform(0, 255, size=(len(CLASSES), 3))
+
+    download_file(MODEL_URL, MODEL_LOCAL_PATH, expected_size=23147564)
+    download_file(PROTOTXT_URL, PROTOTXT_LOCAL_PATH, expected_size=29353)
+
+    DEFAULT_CONFIDENCE_THRESHOLD = 0.5
+
+    class NNVideoTransformer(VideoTransformerBase):
+        confidence_threshold: float
+
+        def __init__(self) -> None:
+            self._net = cv2.dnn.readNetFromCaffe(
+                str(PROTOTXT_LOCAL_PATH), str(MODEL_LOCAL_PATH)
+            )
+            self.confidence_threshold = 0.8
+
+        def _annotate_image(self, image, detections):
+            # loop over the detections
+            (h, w) = image.shape[:2]
+            labels = []
+            for i in np.arange(0, detections.shape[2]):
+                confidence = detections[0, 0, i, 2]
+
+                if confidence > self.confidence_threshold:
+                    # extract the index of the class label from the `detections`,
+                    # then compute the (x, y)-coordinates of the bounding box for
+                    # the object
+                    idx = int(detections[0, 0, i, 1])
+                    box = detections[0, 0, i, 3:7] * np.array([w, h, w, h])
+                    (startX, startY, endX, endY) = box.astype("int")
+
+                    # display the prediction
+                    label = f"{CLASSES[idx]}: {round(confidence * 100, 2)}%"
+                    labels.append(label)
+                    cv2.rectangle(image, (startX, startY), (endX, endY), COLORS[idx], 2)
+                    y = startY - 15 if startY - 15 > 15 else startY + 15
+                    cv2.putText(
+                        image,
+                        label,
+                        (startX, y),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.5,
+                        COLORS[idx],
+                        2,
                     )
+            return image, labels
 
-        if show_box_type == 'blur':
-            if show_bbox == 'Yes':
-                # draw/place bounding boxes on image
-                cv2.rectangle(img, start_point, end_point, color=(0,0,0), thickness=2)
-            
-            box = [(x0, y0), (x1, y1)]
-            blur_x = int(bounding_box['x'] - bounding_box['width'] / 2)
-            blur_y = int(bounding_box['y'] - bounding_box['height'] / 2)
-            blur_width = int(bounding_box['width'])
-            blur_height = int(bounding_box['height'])
-            # region of interest (ROI), or area to blur
-            roi = img[blur_y:blur_y+blur_height, blur_x:blur_x+blur_width]
+        def transform(self, frame: av.VideoFrame) -> np.ndarray:
+            image = frame.to_ndarray(format="bgr24")
+            blob = cv2.dnn.blobFromImage(
+                cv2.resize(image, (300, 300)), 0.007843, (300, 300), 127.5
+            )
+            self._net.setInput(blob)
+            detections = self._net.forward()
+            annotated_image, labels = self._annotate_image(image, detections)
+            # TODO: Show labels
 
-            # ADD BLURRED BBOXES
-            # set blur to (31,31) or (51,51) based on amount of blur desired
-            blur_image = cv2.GaussianBlur(roi,(51,51),0)
-            img[blur_y:blur_y+blur_height, blur_x:blur_x+blur_width] = blur_image
+            return annotated_image
 
-            if show_class_label == 'Show Labels':
-                # add class name with filled background
-                cv2.rectangle(img, (int(x0), int(y0)), (int(x0) + 40, int(y0) - 20), color=(0,0,0),
-                        thickness=-1)
-                cv2.putText(img,
-                    class_name,#text to place on image
-                    (int(x0), int(y0) - 5),#location of text
-                    font,#font
-                    0.4,#font scale
-                    (255,255,255),#text color
-                    thickness=1#thickness/"weight" of text
-                    )
+    webrtc_ctx = webrtc_streamer(
+        key="object-detection",
+        mode=WebRtcMode.SENDRECV,
+        client_settings=WEBRTC_CLIENT_SETTINGS,
+        video_transformer_class=NNVideoTransformer,
+        async_transform=True,
+    )
 
-        # convert from openCV2 to PIL. Notice the COLOR_BGR2RGB which means that 
-        # the color is converted from BGR to RGB when going from OpenCV image to PIL image
-        color_converted = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-        pil_image = Image.fromarray(color_converted)
+    confidence_threshold = st.slider(
+        "Confidence threshold", 0.0, 1.0, DEFAULT_CONFIDENCE_THRESHOLD, 0.05
+    )
+    if webrtc_ctx.video_transformer:
+        webrtc_ctx.video_transformer.confidence_threshold = confidence_threshold
 
-    return pil_image, collected_predictions, predictions_json
+    st.markdown(
+        "This demo uses a model and code from "
+        "https://github.com/robmarkcole/object-detection-app. "
+        "Many thanks to the project."
+    )
 
 
-def run_inference():
-    rf = Roboflow(api_key=st.session_state['private_api_key'])
-    project = rf.workspace(st.session_state['workspace_id']).project(st.session_state['model_id'])
-    project_metadata = project.get_version_information()
-    # dataset = project.version(st.session_state['version_number']).download("yolov5")
-    version = project.version(st.session_state['version_number'])
-    model = version.model
+def app_streaming():
+    """ Media streamings """
+    MEDIAFILES = {
+        "big_buck_bunny_720p_2mb.mp4": {
+            "url": "https://sample-videos.com/video123/mp4/720/big_buck_bunny_720p_2mb.mp4",  # noqa: E501
+            "local_file_path": HERE / "data/big_buck_bunny_720p_2mb.mp4",
+            "type": "video",
+        },
+        "big_buck_bunny_720p_10mb.mp4": {
+            "url": "https://sample-videos.com/video123/mp4/720/big_buck_bunny_720p_10mb.mp4",  # noqa: E501
+            "local_file_path": HERE / "data/big_buck_bunny_720p_10mb.mp4",
+            "type": "video",
+        },
+        "file_example_MP3_700KB.mp3": {
+            "url": "https://file-examples-com.github.io/uploads/2017/11/file_example_MP3_700KB.mp3",  # noqa: E501
+            "local_file_path": HERE / "data/file_example_MP3_700KB.mp3",
+            "type": "audio",
+        },
+        "file_example_MP3_5MG.mp3": {
+            "url": "https://file-examples-com.github.io/uploads/2017/11/file_example_MP3_5MG.mp3",  # noqa: E501
+            "local_file_path": HERE / "data/file_example_MP3_5MG.mp3",
+            "type": "audio",
+        },
+    }
+    media_file_label = st.radio(
+        "Select a media file to stream", tuple(MEDIAFILES.keys())
+    )
+    media_file_info = MEDIAFILES[media_file_label]
+    download_file(media_file_info["url"], media_file_info["local_file_path"])
 
-    project_type = st.write(f"#### Project Type: {project.type}")
+    def create_player():
+        return MediaPlayer(str(media_file_info["local_file_path"]))
 
-    for version_number in range(len(project_metadata)):
-        try:
-            if int(project_metadata[version_number]['model']['id'].split('/')[1]) == int(version.version):
-                project_endpoint = st.write(f"#### Inference Endpoint: {project_metadata[version_number]['model']['endpoint']}")
-                model_id = st.write(f"#### Model ID: {project_metadata[version_number]['model']['id']}")
-                version_name  = st.write(f"#### Version Name: {project_metadata[version_number]['name']}")
-                input_img_size = st.write(f"Input Image Size for Model Training (pixels, px):")
-                width_metric, height_metric = st.columns(2)
-                width_metric.metric(label='Pixel Width', value=project_metadata[version_number]['preprocessing']['resize']['width'])
-                height_metric.metric(label='Pixel Height', value=project_metadata[version_number]['preprocessing']['resize']['height'])
+        # NOTE: To stream the video from webcam, use the code below.
+        # return MediaPlayer(
+        #     "1:none",
+        #     format="avfoundation",
+        #     options={"framerate": "30", "video_size": "1280x720"},
+        # )
 
-                if project_metadata[version_number]['model']['fromScratch']:
-                    train_checkpoint = 'Checkpoint'
-                    st.write(f"#### Version trained from {train_checkpoint}")
-                elif project_metadata[version_number]['model']['fromScratch'] is False:
-                    train_checkpoint = 'Scratch'
-                    train_checkpoint = st.write(f"#### Version trained from {train_checkpoint}")
-                else:
-                    train_checkpoint = 'Not Yet Trained'
-                    train_checkpoint = st.write(f"#### Version is {train_checkpoint}")
-        except KeyError:
-            continue
+    WEBRTC_CLIENT_SETTINGS.update(
+        {
+            "fmedia_stream_constraints": {
+                "video": media_file_info["type"] == "video",
+                "audio": media_file_info["type"] == "audio",
+            }
+        }
+    )
 
-    ## Subtitle.
-    st.write('### Inferenced/Prediction Image')
-    
-    ## Pull in default image or user-selected image.
-    if uploaded_file is None:
-        # Default image.
-        default_img_path = "images/test_box.jpg"
-        image = Image.open(default_img_path)
-        original_image = image
-        open_cv_image = cv2.imread(default_img_path)
-        original_opencv_image = open_cv_image
-        # Display response image.
-        pil_image_drawBoxes, df_drawBoxes, json_values = drawBoxes(model, default_img_path, default_img_path,
-                                                                   st.session_state['include_bbox'],
-                                                                   st.session_state['include_class'],
-                                                                   st.session_state['box_type'])
-        
-    else:
-        # User-selected image.
-        image = Image.open(uploaded_file)
-        original_image = image
-        opencv_convert = image.convert('RGB')
-        open_cv_image = np.array(opencv_convert)
-        # Convert RGB to BGR: OpenCV deals with BGR images rather than RGB
-        open_cv_image = open_cv_image[:, :, ::-1].copy()
-        # Convert PIL image to byte-string so it can be sent for prediction to the Roboflow Python Package
-        b = io.BytesIO()
-        image.save(b, format='JPEG')
-        im_bytes = b.getvalue() 
-        # Display response image.
-        pil_image_drawBoxes, df_drawBoxes, json_values = drawBoxes(model, open_cv_image, im_bytes,
-                                                                   st.session_state['include_bbox'],
-                                                                   st.session_state['include_class'],
-                                                                   st.session_state['box_type'])
-    
-    st.image(pil_image_drawBoxes,
-            use_column_width=True)
-    # Display original image.
-    st.write("#### Original Image")
-    st.image(original_image,
-            use_column_width=True)
+    webrtc_streamer(
+        key=f"media-streaming-{media_file_label}",
+        mode=WebRtcMode.RECVONLY,
+        client_settings=WEBRTC_CLIENT_SETTINGS,
+        player_factory=create_player,
+    )
 
-    json_tab, statistics_tab, project_tab = st.tabs(["Results & JSON Output", "Prediction Statistics", "Project Info"])
 
-    with json_tab:
-        ## Display results dataframe in main app.
-        st.write('### Prediction Results (Pandas DataFrame)')
-        st.dataframe(df_drawBoxes)
-        ## Display the JSON in main app.
-        st.write('### JSON Output')
-        st.write(json_values)
+def app_sendonly():
+    """A sample to use WebRTC in sendonly mode to transfer frames
+    from the browser to the server and to render frames via `st.image`."""
+    webrtc_ctx = webrtc_streamer(
+        key="loopback",
+        mode=WebRtcMode.SENDONLY,
+        client_settings=WEBRTC_CLIENT_SETTINGS,
+    )
 
-    with statistics_tab:
-        ## Summary statistics section in main app.
-        st.write('### Summary Statistics')
-        st.metric(label='Number of Bounding Boxes (ignoring overlap thresholds)', value=f"{len(df_drawBoxes.index)}")
-        st.metric(label='Average Confidence Level of Bounding Boxes:', value=f"{(np.round(np.mean(df_drawBoxes['confidence'].to_numpy()),4))}")
-
-        ## Histogram in main app.
-        st.write('### Histogram of Confidence Levels')
-        fig, ax = plt.subplots()
-        ax.hist(df_drawBoxes['confidence'], bins=10, range=(0.0,1.0))
-        st.pyplot(fig)
-
-    with project_tab:
-        st.write(f"Annotation Group Name: {project.annotation}")
-        col1, col2, col3 = st.columns(3)
-        for version_number in range(len(project_metadata)):
+    if webrtc_ctx.video_receiver:
+        image_loc = st.empty()
+        while True:
             try:
-                if int(project_metadata[version_number]['model']['id'].split('/')[1]) == int(version.version):
-                    col1.write(f'Total images in the version: {version.images}')
-                    col1.metric(label='Augmented Train Set Image Count', value=version.splits['train'])
-                    col2.metric(label='mean Average Precision (mAP)', value=f"{float(project_metadata[version_number]['model']['map'])}%")
-                    col2.metric(label='Precision', value=f"{float(project_metadata[version_number]['model']['precision'])}%")
-                    col2.metric(label='Recall', value=f"{float(project_metadata[version_number]['model']['recall'])}%")
-                    col3.metric(label='Train Set Image Count', value=project.splits['train'])
-                    col3.metric(label='Valid Set Image Count', value=project.splits['valid'])
-                    col3.metric(label='Test Set Image Count', value=project.splits['test'])
-            except KeyError:
-                continue
+                frame = webrtc_ctx.video_receiver.frames_queue.get(timeout=1)
+            except queue.Empty:
+                print("Queue is empty. Stop the loop.")
+                webrtc_ctx.video_receiver.stop()
+                break
 
-        col4, col5, col6 = st.columns(3)
-        col4.write('Preprocessing steps applied:')
-        col4.json(version.preprocessing)
-        col5.write('Augmentation steps applied:')
-        col5.json(version.augmentation)
-        col6.metric(label='Train Set', value=version.splits['train'], delta=f"Increased by Factor of {(version.splits['train'] / project.splits['train'])}")
-        col6.metric(label='Valid Set', value=version.splits['valid'], delta="No Change")
-        col6.metric(label='Test Set', value=version.splits['test'], delta="No Change")
+            img = frame.to_ndarray(format="bgr24")
+            img = PIL.Image.fromarray(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
+            image_loc.image(img)
 
-##########
-##### Set up sidebar.
-##########
-# Add in location to select image.
-st.sidebar.write("#### Select an image to upload.")
-uploaded_file = st.sidebar.file_uploader("",
-                                        type=['png', 'jpg', 'jpeg'],
-                                        accept_multiple_files=False)
 
-st.sidebar.write("[Find additional images on Roboflow Universe.](https://universe.roboflow.com/)")
-st.sidebar.write("[Improving Your Model with Active Learning](https://help.roboflow.com/implementing-active-learning)")
+WEBRTC_CLIENT_SETTINGS = ClientSettings(
+    rtc_configuration={"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]},
+    media_stream_constraints={"video": True, "audio": True},
+)
 
-## Add in sliders.
-show_bbox = st.sidebar.radio("Show Bounding Boxes:",
-                            options=['Yes', 'No'],
-                            key='include_bbox')
-
-show_class_label = st.sidebar.radio("Show Class Labels:",
-                                    options=['Show Labels', 'Hide Labels'],
-                                    key='include_class')
-
-show_box_type = st.sidebar.selectbox("Display Bounding Boxes As:",
-                                    options=('regular', 'fill', 'blur'),
-                                    key='box_type')
-
-confidence_threshold = st.sidebar.slider("Confidence threshold (%): What is the minimum acceptable confidence level for displaying a bounding box?", 0, 100, 40, 1)
-overlap_threshold = st.sidebar.slider("Overlap threshold (%): What is the maximum amount of overlap permitted between visible bounding boxes?", 0, 100, 30, 1)
-
-image = Image.open("./images/roboflow_logo.png")
-st.sidebar.image(image,
-                use_column_width=True)
-
-image = Image.open("./images/streamlit_logo.png")
-st.sidebar.image(image,
-                use_column_width=True)
-        
-##########
-##### Set up project access.
-##########
-
-## Title.
-st.write("# Roboflow Object Detection Tests")
-
-with st.form("project_access"):
-  workspace_id = st.text_input('Workspace ID', key='workspace_id',
-                               help='Finding Your Project Information: https://docs.roboflow.com/python#finding-your-project-information-manually',
-                               placeholder='Input Workspace ID')
-  model_id = st.text_input('Model ID', key='model_id', placeholder='Input Model ID')
-  version_number = st.text_input('Trained Model Version Number', key='version_number', placeholder='Input Trained Model Version Number')
-  private_api_key = st.text_input('Private API Key', key='private_api_key', type='password',placeholder='Input Private API Key')
-  submitted = st.form_submit_button("Verify and Load Model")
-  if submitted:
-    st.write("Loading model...")
-    run_inference()
+if __name__ == "__main__":
+    setup_logger()
+    main()
+Footer
+© 2023 GitHub, Inc.
+Footer navigation
+Terms
+Privac
