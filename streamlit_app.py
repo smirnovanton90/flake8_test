@@ -59,7 +59,7 @@ def download_file(url, download_to: Path, expected_size=None):
 
                     # We perform animation by overwriting the elements.
                     weights_warning.warning(
-                        "Загрузка %s... (%6.2f/%6.2f MB)"
+                        "Downloading %s... (%6.2f/%6.2f MB)"
                         % (url, counter / MEGABYTES, length / MEGABYTES)
                     )
                     progress_bar.progress(min(counter / length, 1.0))
@@ -77,7 +77,7 @@ RTC_CONFIGURATION = RTCConfiguration(
 
 
 def main():
-    st.header("SKLADRONE demo")
+    st.header("SKLADRON demo")
 
     pages = {
         "Real time object detection (sendrecv)": app_object_detection,
@@ -85,7 +85,7 @@ def main():
     page_titles = pages.keys()
 
     page_title = st.sidebar.selectbox(
-        "Текущий режим",
+        "Текущий режим сканирования",
         page_titles,
     )
     st.subheader(page_title)
@@ -249,50 +249,41 @@ def app_object_detection():
         "Many thanks to the project."
     )
 
- def callback(frame: av.VideoFrame) -> av.VideoFrame:
-        image = frame.to_ndarray(format="bgr24")
-        blob = cv2.dnn.blobFromImage(
-            cv2.resize(image, (300, 300)), 0.007843, (300, 300), 127.5
-        )
-        net.setInput(blob)
-        detections = net.forward()
-        annotated_image, result = _annotate_image(image, detections)
 
-        # NOTE: This `recv` method is called in another thread,
-        # so it must be thread-safe.
-        result_queue.put(result)  # TODO:
-
-        return av.VideoFrame.from_ndarray(annotated_image, format="bgr24")
-
-    webrtc_ctx = webrtc_streamer(
-        key="object-detection",
-        mode=WebRtcMode.SENDRECV,
-        rtc_configuration=RTC_CONFIGURATION,
-        video_frame_callback=callback,
-        media_stream_constraints={"video": True, "audio": False},
-        async_processing=True,
+def app_streaming():
+    """Media streamings"""
+    MEDIAFILES = {
+        "big_buck_bunny_720p_2mb.mp4 (local)": {
+            "url": "https://sample-videos.com/video123/mp4/720/big_buck_bunny_720p_2mb.mp4",  # noqa: E501
+            "local_file_path": HERE / "data/big_buck_bunny_720p_2mb.mp4",
+            "type": "video",
+        },
+        "big_buck_bunny_720p_10mb.mp4 (local)": {
+            "url": "https://sample-videos.com/video123/mp4/720/big_buck_bunny_720p_10mb.mp4",  # noqa: E501
+            "local_file_path": HERE / "data/big_buck_bunny_720p_10mb.mp4",
+            "type": "video",
+        },
+        "file_example_MP3_700KB.mp3 (local)": {
+            "url": "https://file-examples-com.github.io/uploads/2017/11/file_example_MP3_700KB.mp3",  # noqa: E501
+            "local_file_path": HERE / "data/file_example_MP3_700KB.mp3",
+            "type": "audio",
+        },
+        "file_example_MP3_5MG.mp3 (local)": {
+            "url": "https://file-examples-com.github.io/uploads/2017/11/file_example_MP3_5MG.mp3",  # noqa: E501
+            "local_file_path": HERE / "data/file_example_MP3_5MG.mp3",
+            "type": "audio",
+        },
+        "rtsp://wowzaec2demo.streamlock.net/vod/mp4:BigBuckBunny_115k.mov": {
+            "url": "rtsp://wowzaec2demo.streamlock.net/vod/mp4:BigBuckBunny_115k.mov",
+            "type": "video",
+        },
+    }
+    media_file_label = st.radio(
+        "Select a media source to stream", tuple(MEDIAFILES.keys())
     )
-
-    if st.checkbox("Show the detected labels", value=True):
-        if webrtc_ctx.state.playing:
-            labels_placeholder = st.empty()
-            # NOTE: The video transformation with object detection and
-            # this loop displaying the result labels are running
-            # in different threads asynchronously.
-            # Then the rendered video frames and the labels displayed here
-            # are not strictly synchronized.
-            while True:
-                try:
-                    result = result_queue.get(timeout=1.0)
-                except queue.Empty:
-                    result = None
-                labels_placeholder.table(result)
-
-    st.markdown(
-        "This demo uses a model and code from "
-        "https://github.com/robmarkcole/object-detection-app. "
-        "Many thanks to the project."
-    )
+    media_file_info = MEDIAFILES[media_file_label]
+    if "local_file_path" in media_file_info:
+        download_file(media_file_info["url"], media_file_info["local_file_path"])
 
     def create_player():
         if "local_file_path" in media_file_info:
@@ -370,7 +361,6 @@ def app_object_detection():
         "https://github.com/aiortc/aiortc/blob/2362e6d1f0c730a0f8c387bbea76546775ad2fe8/examples/server/server.py#L34. "  # noqa: E501
         "Many thanks to the project."
     )
-
 
 if __name__ == "__main__":
     import os
