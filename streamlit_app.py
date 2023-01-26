@@ -59,7 +59,7 @@ def download_file(url, download_to: Path, expected_size=None):
 
                     # We perform animation by overwriting the elements.
                     weights_warning.warning(
-                        "Downloading %s... (%6.2f/%6.2f MB)"
+                        "Загрузка %s... (%6.2f/%6.2f MB)"
                         % (url, counter / MEGABYTES, length / MEGABYTES)
                     )
                     progress_bar.progress(min(counter / length, 1.0))
@@ -249,22 +249,146 @@ def app_object_detection():
         "Many thanks to the project."
     )
 
-def app_media_constraints():
-    """A sample to configure MediaStreamConstraints object"""
-    frame_rate = 5
-    webrtc_streamer(
-        key="media-constraints",
+ def callback(frame: av.VideoFrame) -> av.VideoFrame:
+        image = frame.to_ndarray(format="bgr24")
+        blob = cv2.dnn.blobFromImage(
+            cv2.resize(image, (300, 300)), 0.007843, (300, 300), 127.5
+        )
+        net.setInput(blob)
+        detections = net.forward()
+        annotated_image, result = _annotate_image(image, detections)
+
+        # NOTE: This `recv` method is called in another thread,
+        # so it must be thread-safe.
+        result_queue.put(result)  # TODO:
+
+        return av.VideoFrame.from_ndarray(annotated_image, format="bgr24")
+
+    webrtc_ctx = webrtc_streamer(
+        key="object-detection",
         mode=WebRtcMode.SENDRECV,
         rtc_configuration=RTC_CONFIGURATION,
-        media_stream_constraints={
-            "video": {"frameRate": {"ideal": frame_rate}},
-        },
-        video_html_attrs={
-            "style": {"width": "50%", "margin": "0 auto", "border": "5px yellow solid"},
-            "controls": False,
-            "autoPlay": True,
-        },
+        video_frame_callback=callback,
+        media_stream_constraints={"video": True, "audio": False},
+        async_processing=True,
     )
-    st.write(f"The frame rate is set as {frame_rate}. Video style is changed.")
+
+    if st.checkbox("Show the detected labels", value=True):
+        if webrtc_ctx.state.playing:
+            labels_placeholder = st.empty()
+            # NOTE: The video transformation with object detection and
+            # this loop displaying the result labels are running
+            # in different threads asynchronously.
+            # Then the rendered video frames and the labels displayed here
+            # are not strictly synchronized.
+            while True:
+                try:
+                    result = result_queue.get(timeout=1.0)
+                except queue.Empty:
+                    result = None
+                labels_placeholder.table(result)
+
+    st.markdown(
+        "This demo uses a model and code from "
+        "https://github.com/robmarkcole/object-detection-app. "
+        "Many thanks to the project."
+    )
+
+    def create_player():
+        if "local_file_path" in media_file_info:
+            return MediaPlayer(str(media_file_info["local_file_path"]))
+        else:
+            return MediaPlayer(media_file_info["url"])
+
+        # NOTE: To stream the video from webcam, use the code below.
+        # return MediaPlayer(
+        #     "1:none",
+        #     format="avfoundation",
+        #     options={"framerate": "30", "video_size": "1280x720"},
+        # )
+
+    key = f"media-streaming-{media_file_label}"
+    ctx: Optional[WebRtcStreamerContext] = st.session_state.get(key)
+    if media_file_info["type"] == "video" and ctx and ctx.state.playing:
+        _type = st.radio(
+            "Select transform type", ("noop", "cartoon", "edges", "rotate")
+        )
+    else:
+        _type = "noop"
+
+    def video_frame_callback(frame: av.VideoFrame) -> av.VideoFrame:
+        img = frame.to_ndarray(format="bgr24")
+
+        if _type == "noop":
+            pass
+        elif _type == "cartoon":
+            # prepare color
+            img_color = cv2.pyrDown(cv2.pyrDown(img))
+            for _ in range(6):
+                img_color = cv2.bilateralFilter(img_color, 9, 9, 7)
+            img_color = cv2.pyrUp(cv2.pyrUp(img_color))
+
+            # prepare edges
+            img_edges = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+            img_edges = cv2.adaptiveThreshold(
+                cv2.medianBlur(img_edges, 7),
+                255,
+                cv2.ADAPTIVE_THRESH_MEAN_C,
+                cv2.THRESH_BINARY,
+                9,
+                2,
+            )
+            img_edges = cv2.cvtColor(img_edges, cv2.COLOR_GRAY2RGB)
+
+            # combine color and edges
+            img = cv2.bitwise_and(img_color, img_edges)
+        elif _type == "edges":
+            # perform edge detection
+            img = cv2.cvtColor(cv2.Canny(img, 100, 200), cv2.COLOR_GRAY2BGR)
+        elif _type == "rotate":
+            # rotate image
+            rows, cols, _ = img.shape
+            M = cv2.getRotationMatrix2D((cols / 2, rows / 2), frame.time * 45, 1)
+            img = cv2.warpAffine(img, M, (cols, rows))
+
+        return av.VideoFrame.from_ndarray(img, format="bgr24")
+
+    webrtc_streamer(
+        key=key,
+        mode=WebRtcMode.RECVONLY,
+        rtc_configuration=RTC_CONFIGURATION,
+        media_stream_constraints={
+            "video": media_file_info["type"] == "video",
+            "audio": media_file_info["type"] == "audio",
+        },
+        player_factory=create_player,
+        video_frame_callback=video_frame_callback,
+    )
+
+    st.markdown(
+        "The video filter in this demo is based on "
+        "https://github.com/aiortc/aiortc/blob/2362e6d1f0c730a0f8c387bbea76546775ad2fe8/examples/server/server.py#L34. "  # noqa: E501
+        "Many thanks to the project."
+    )
+
+
+if __name__ == "__main__":
+    import os
+
+    DEBUG = os.environ.get("DEBUG", "false").lower() not in ["false", "no", "0"]
+
+    logging.basicConfig(
+        format="[%(asctime)s] %(levelname)7s from %(name)s in %(pathname)s:%(lineno)d: "
+        "%(message)s",
+        force=True,
+    )
+
+    logger.setLevel(level=logging.DEBUG if DEBUG else logging.INFO)
+
+    st_webrtc_logger = logging.getLogger("streamlit_webrtc")
+    st_webrtc_logger.setLevel(logging.DEBUG)
+
+    fsevents_logger = logging.getLogger("fsevents")
+    fsevents_logger.setLevel(logging.WARNING)
 
     main()
