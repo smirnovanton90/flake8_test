@@ -412,8 +412,3 @@ WEBRTC_CLIENT_SETTINGS = ClientSettings(
 if __name__ == "__main__":
     setup_logger()
     main()
-Footer
-© 2023 GitHub, Inc.
-Footer navigation
-Terms
-Privac
