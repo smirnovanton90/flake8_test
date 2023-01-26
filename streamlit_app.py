@@ -1,17 +1,19 @@
 import streamlit as st
+
+!pip install opencv-python-headless==4.1.2.30
+
 import requests
 import base64
 import io
 from PIL import Image, ImageDraw, ImageFont
 import glob
-import opencv-python
+import cv2 as cv2
 from base64 import decodebytes
 from io import BytesIO
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 from roboflow import Roboflow
-
 
 ## store initial session state values
 workspace_id, model_id, version_number, private_api_key = ('', '', '', '')
