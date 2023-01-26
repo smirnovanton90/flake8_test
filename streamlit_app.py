@@ -1,7 +1,4 @@
 import streamlit as st
-
-!pip install opencv-python-headless==4.1.2.30
-
 import requests
 import base64
 import io
