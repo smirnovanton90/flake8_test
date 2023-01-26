@@ -4,7 +4,7 @@ import base64
 import io
 from PIL import Image, ImageDraw, ImageFont
 import glob
-import cv2
+import opencv-python
 from base64 import decodebytes
 from io import BytesIO
 import numpy as np
