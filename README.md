@@ -25,7 +25,7 @@ roboflow==0.2.28
 https://github.com/vin-57/skladron_streamlit
 
 ## Ссылка на Streamlit
-
+https://vin-57-skladron-streamlit-streamlit-app-v0iq1g.streamlit.app/
 
 ## Ссылка на  Prezi
 https://prezi.com/view/sOPJ7TjuigcUpCi46T8H/
