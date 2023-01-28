@@ -107,10 +107,6 @@ def main():
             logger.debug(f"  {thread.name} ({thread.ident})")
 
 def app_object_detection():
-    from roboflow import Roboflow
-    rf = Roboflow(api_key="ENTER-YOUR-API-KEY-HERE")
-    project = rf.workspace().project("PROJECT-NAME-HERE") # Roboflow project name here
-    model = project.version(1).model # Model version here
     """Object detection demo with MobileNet SSD.
     This model and code are based on
     https://github.com/robmarkcole/object-detection-app
