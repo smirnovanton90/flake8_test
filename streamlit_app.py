@@ -347,11 +347,7 @@ def app_object_detection():
         player_factory=create_player,
         video_frame_callback=video_frame_callback,
     )
-
-   
-    )
-
-
+    
 if __name__ == "__main__":
     import os
 
