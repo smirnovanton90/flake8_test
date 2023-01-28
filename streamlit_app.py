@@ -223,7 +223,7 @@ def app_object_detection():
         async_processing=True,
     )
 
-    if st.checkbox("Show the detected labels", value=True):
+    if st.checkbox("Показывать обнаруженные объекты", value=True):
         if webrtc_ctx.state.playing:
             labels_placeholder = st.empty()
             # NOTE: The video transformation with object detection and
@@ -238,11 +238,7 @@ def app_object_detection():
                     result = None
                 labels_placeholder.table(result)
 
-    st.markdown(
-        "This demo uses a model and code from "
-        "https://github.com/robmarkcole/object-detection-app. "
-        "Many thanks to the project."
-    )
+
 
 
 def app_streaming():
