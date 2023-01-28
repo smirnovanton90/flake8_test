@@ -25,25 +25,24 @@ HERE = Path(__file__).parent
 
 logger = logging.getLogger(__name__)
 
-
+# модуль загрузки (не используется в данной версии)
 def download_file(url, download_to: Path, expected_size=None):
-    # Don't download the file twice.
-    # (If possible, verify the download using the file length.)
+    # Не загружайте файлы дважды
     if download_to.exists():
         if expected_size:
             if download_to.stat().st_size == expected_size:
                 return
         else:
-            st.info(f"{url} is already downloaded.")
-            if not st.button("Download again?"):
+            st.info(f"{url} уже загружен.")
+            if not st.button("Загрузить еще?"):
                 return
 
     download_to.parent.mkdir(parents=True, exist_ok=True)
 
-    # These are handles to two visual elements to animate.
+    # элементы анимации.
     weights_warning, progress_bar = None, None
     try:
-        weights_warning = st.warning("Downloading %s..." % url)
+        weights_warning = st.warning("Загрузка %s..." % url)
         progress_bar = st.progress(0)
         with open(download_to, "wb") as output_file:
             with urllib.request.urlopen(url) as response:
@@ -57,13 +56,13 @@ def download_file(url, download_to: Path, expected_size=None):
                     counter += len(data)
                     output_file.write(data)
 
-                    # We perform animation by overwriting the elements.
+                    #  Анимация загрузки.
                     weights_warning.warning(
                         "Загрузка %s... (%6.2f/%6.2f MB)"
                         % (url, counter / MEGABYTES, length / MEGABYTES)
                     )
                     progress_bar.progress(min(counter / length, 1.0))
-    # Finally, we remove these visual elements by calling .empty().
+    # наконец, удаляем визуальные элементы вызовом .empty().
     finally:
         if weights_warning is not None:
             weights_warning.empty()
@@ -80,7 +79,7 @@ def main():
     st.header("SKLADRONE demo")
 
     pages = {
-        "Real time object detection (sendrecv)": app_object_detection,
+        "Обнаружение объектов в реальном времени(sendrecv)": app_object_detection,
     }
     page_titles = pages.keys()
 
@@ -96,7 +95,7 @@ def main():
     st.sidebar.markdown(
         """
 ---
-<a href="https://www.buymeacoffee.com/whitphx" target="_blank"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me A Coffee" width="180" height="50" ></a>
+<a href="https://github.com/vin-57/skladron_streamlit/blob/main/skladron.png" target="_blank"><img src="https://raw.githubusercontent.com/vin-57/skladron_streamlit/main/skladron.png" alt="Buy Me A Coffee" width="180" height="50" ></a>
     """,  # noqa: E501
         unsafe_allow_html=True,
     )
@@ -106,10 +105,9 @@ def main():
         if thread.is_alive():
             logger.debug(f"  {thread.name} ({thread.ident})")
 
+            # модуль обнаружения объектов
 def app_object_detection():
-    """Object detection demo with MobileNet SSD.
-    This model and code are based on
-    https://github.com/robmarkcole/object-detection-app
+    """Обнаружение объектов с помощью модели MobileNet SSD.
     """
     MODEL_URL = "https://github.com/robmarkcole/object-detection-app/raw/master/model/MobileNetSSD_deploy.caffemodel"  # noqa: E501
     MODEL_LOCAL_PATH = HERE / "./models/MobileNetSSD_deploy.caffemodel"
@@ -155,7 +153,7 @@ def app_object_detection():
         name: str
         prob: float
 
-    # Session-specific caching
+    # Кэширование
     cache_key = "object_detection_dnn"
     if cache_key in st.session_state:
         net = st.session_state[cache_key]
@@ -175,9 +173,9 @@ def app_object_detection():
             confidence = detections[0, 0, i, 2]
 
             if confidence > confidence_threshold:
-                # extract the index of the class label from the `detections`,
-                # then compute the (x, y)-coordinates of the bounding box for
-                # the object
+                # извелчение индекса метки класса из `detections`,
+                # затем вычисляем (x, y)-координта ограничивающей рамкм
+                # определяем объект
                 idx = int(detections[0, 0, i, 1])
                 box = detections[0, 0, i, 3:7] * np.array([w, h, w, h])
                 (startX, startY, endX, endY) = box.astype("int")
@@ -185,7 +183,7 @@ def app_object_detection():
                 name = CLASSES[idx]
                 result.append(Detection(name=name, prob=float(confidence)))
 
-                # display the prediction
+                # отображаем прогноз
                 label = f"{name}: {round(confidence * 100, 2)}%"
                 cv2.rectangle(image, (startX, startY), (endX, endY), COLORS[idx], 2)
                 y = startY - 15 if startY - 15 > 15 else startY + 15
@@ -202,7 +200,7 @@ def app_object_detection():
 
     result_queue = (
         queue.Queue()
-    )  # TODO: A general-purpose shared state object may be more useful.
+    )  # объект общего состояния общего назначения может быит более полезным
 
     def callback(frame: av.VideoFrame) -> av.VideoFrame:
         image = frame.to_ndarray(format="bgr24")
@@ -213,8 +211,7 @@ def app_object_detection():
         detections = net.forward()
         annotated_image, result = _annotate_image(image, detections)
 
-        # NOTE: This `recv` method is called in another thread,
-        # so it must be thread-safe.
+
         result_queue.put(result)  # TODO:
 
         return av.VideoFrame.from_ndarray(annotated_image, format="bgr24")
@@ -231,11 +228,6 @@ def app_object_detection():
     if st.checkbox("Show the detected labels", value=True):
         if webrtc_ctx.state.playing:
             labels_placeholder = st.empty()
-            # NOTE: The video transformation with object detection and
-            # this loop displaying the result labels are running
-            # in different threads asynchronously.
-            # Then the rendered video frames and the labels displayed here
-            # are not strictly synchronized.
             while True:
                 try:
                     result = result_queue.get(timeout=1.0)
@@ -243,11 +235,7 @@ def app_object_detection():
                     result = None
                 labels_placeholder.table(result)
 
-    st.markdown(
-        "This demo uses a model and code from "
-        "https://github.com/robmarkcole/object-detection-app. "
-        "Many thanks to the project."
-    )
+
 
  def callback(frame: av.VideoFrame) -> av.VideoFrame:
         image = frame.to_ndarray(format="bgr24")
@@ -288,11 +276,7 @@ def app_object_detection():
                     result = None
                 labels_placeholder.table(result)
 
-    st.markdown(
-        "This demo uses a model and code from "
-        "https://github.com/robmarkcole/object-detection-app. "
-        "Many thanks to the project."
-    )
+
 
     def create_player():
         if "local_file_path" in media_file_info:
@@ -365,10 +349,7 @@ def app_object_detection():
         video_frame_callback=video_frame_callback,
     )
 
-    st.markdown(
-        "The video filter in this demo is based on "
-        "https://github.com/aiortc/aiortc/blob/2362e6d1f0c730a0f8c387bbea76546775ad2fe8/examples/server/server.py#L34. "  # noqa: E501
-        "Many thanks to the project."
+   
     )
 
 
