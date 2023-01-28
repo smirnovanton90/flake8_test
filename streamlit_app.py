@@ -94,7 +94,7 @@ def main():
     page_func()
 
 
-    )
+    
 
     logger.debug("=== Alive threads ===")
     for thread in threading.enumerate():
