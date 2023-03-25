@@ -95,6 +95,7 @@ def main():
         if thread.is_alive():
             logger.debug(f"  {thread.name} ({thread.ident})")
 
+            
 def app_object_detection():
     """Object detection demo with MobileNet SSD.
     This model and code are based on
@@ -105,7 +106,6 @@ def app_object_detection():
     PROTOTXT_URL = "https://github.com/robmarkcole/object-detection-app/raw/master/model/MobileNetSSD_deploy.prototxt.txt"  # noqa: E501
     PROTOTXT_LOCAL_PATH = HERE / "./models/MobileNetSSD_deploy.prototxt.txt"
 
-    
     CLASSES = [
         "background",
         "aeroplane",
