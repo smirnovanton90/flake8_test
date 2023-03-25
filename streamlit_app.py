@@ -1,4 +1,3 @@
-import asyncio
 import logging
 import queue
 import threading
@@ -8,9 +7,7 @@ from typing import List, NamedTuple, Optional
 
 import av
 import cv2
-import matplotlib.pyplot as plt
 import numpy as np
-import pydub
 import streamlit as st
 from aiortc.contrib.media import MediaPlayer
 
@@ -93,9 +90,6 @@ def main():
     page_func = pages[page_title]
     page_func()
 
-
-    
-
     logger.debug("=== Alive threads ===")
     for thread in threading.enumerate():
         if thread.is_alive():
@@ -111,6 +105,7 @@ def app_object_detection():
     PROTOTXT_URL = "https://github.com/robmarkcole/object-detection-app/raw/master/model/MobileNetSSD_deploy.prototxt.txt"  # noqa: E501
     PROTOTXT_LOCAL_PATH = HERE / "./models/MobileNetSSD_deploy.prototxt.txt"
 
+    
     CLASSES = [
         "background",
         "aeroplane",
@@ -239,8 +234,6 @@ def app_object_detection():
                 labels_placeholder.table(result)
 
 
-
-
 def app_streaming():
     """Media streamings"""
     MEDIAFILES = {
@@ -353,6 +346,7 @@ def app_streaming():
         "Many thanks to the project."
     )
 
+    
 if __name__ == "__main__":
     import os
 
