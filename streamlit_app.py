@@ -93,9 +93,9 @@ def main():
     logger.debug("=== Alive threads ===")
     for thread in threading.enumerate():
         if thread.is_alive():
-            logger.debug(f"  {thread.name} ({thread.ident})")          
+            logger.debug(f"  {thread.name} ({thread.ident})")
 
-            
+
 def app_object_detection():
     """Object detection demo with MobileNet SSD.
     This model and code are based on
@@ -345,6 +345,7 @@ def app_streaming():
         "https://github.com/aiortc/aiortc/blob/2362e6d1f0c730a0f8c387bbea76546775ad2fe8/examples/server/server.py#L34. "  # noqa: E501
         "Many thanks to the project."
     )
+
 
 if __name__ == "__main__":
     import os
