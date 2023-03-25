@@ -93,7 +93,7 @@ def main():
     logger.debug("=== Alive threads ===")
     for thread in threading.enumerate():
         if thread.is_alive():
-            logger.debug(f"  {thread.name} ({thread.ident})")
+            logger.debug(f"  {thread.name} ({thread.ident})")          
 
             
 def app_object_detection():
@@ -346,7 +346,6 @@ def app_streaming():
         "Many thanks to the project."
     )
 
-    
 if __name__ == "__main__":
     import os
 
